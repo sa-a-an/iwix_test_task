@@ -1,21 +1,19 @@
 import aiohttp
-import sys
-import logging
 import time
 
 from bs4 import BeautifulSoup
 
-from data_model import MainPageData, ReviewData
+from crawlers.yelp.data_model import MainPageData, ReviewData
 from utils.get_user_agent import generate_user_agent
 from utils.logger_setup import get_logger
 
 class Crawler:
     BASE_YELP_URL_TEMPLATE = 'https://www.yelp.com{biz}'
     BASE_URL_TEMPLATE = 'https://www.yelp.com/search?find_desc={category}&find_loc={location}&start={page}'
-    def __init__(self, category: str, location: str, **kwargs):
+    def __init__(self, category: str, location: str, number_of_pages: int = 10,**kwargs):
 
         self.logger = get_logger(__name__)
-
+        self._number_of_pages = number_of_pages
         self._additional_kwargs = kwargs
         self._category = category
         self._location = location.replace(',', '%2C').replace(' ', '+')
@@ -29,6 +27,7 @@ class Crawler:
         return url
 
     async def __get_list_page_main_block(self, soup: BeautifulSoup):
+        print(soup)
         _blocks = soup.find('ul', {'class':'list__09f24__ynIEd'}).find_all('div', {'class': 'css-65wjx3'})[2:-1]
         for data in _blocks:
             yield data
@@ -45,17 +44,16 @@ class Crawler:
                 rating=buisness_raitings,
                 number_of_reviews=number_of_rewiews,
                 reviews=None)
-            self.logger.info(data)
+            yield data
 
     def __build_yelp_url(self, url: str):
         return self.BASE_YELP_URL_TEMPLATE.format(biz=url)
 
-    def __get_soup(self, html: str):
+    async def __get_soup(self, html: str):
         return BeautifulSoup(html, 'html.parser')
 
     async def __request(self, session: aiohttp.ClientSession, url: str):
-        headers={"User-Agent": self.user_agent_list[0]}
-        async with session.get(url, headers=headers) as resp:
+        async with session.get(url, headers=self.user_agent) as resp:
             return await resp.text()
 
     async def __get_buisness_name(self, soup: BeautifulSoup):
@@ -85,35 +83,49 @@ class Crawler:
         return self.__build_yelp_url(_block['href'])
 
     async def __get_buisness_url(self, soup: BeautifulSoup) -> str:
-        _block = soup.find('div', {'class':'css-s81j3n'}).find['a'].text
+        _block = soup.find('div', {'class':'css-s81j3n'}).find('a').text
         return 'http://www.' + _block
 
-    async def __get_reviewer_name(self):
-        ...
+    async def __gather_review_info(self, soup: BeautifulSoup) -> list[ReviewData]:
+        _blocks = soup.find('div', {'class':'css-1qn0b6x', 'id': 'reviews'}).find_all('li', {'class':'css-1q2nwpv'})
+        result = []
+        for block in _blocks:
+            reviewer_name = await self.__get_review_name(block)
+            reviewer_location = await self.__get_reviewer_location(block)
+            review_date = await self.__get_review_date(block)
+            result.append(ReviewData(reviewer_name=reviewer_name, reviewe_location=reviewer_location, review_date=review_date))
 
-    async def __get_reviewer_location(self):
-        ...
+        return result
+    async def __get_review_name(self, soup: BeautifulSoup) -> str:
+        _data = soup.find('span', {'class':'fs-block css-ux5mu6'}).text
+        return _data
 
-    async def __get_reviewer_location(self):
-        ... 
+    async def __get_reviewer_location(self, soup: BeautifulSoup) -> str:
+        _data = soup.find('span', {'class':' ss-qgunke'}).text
+        return _data
+
+    async def __get_review_date(self, soup: BeautifulSoup) -> str:
+        _data = soup.find('span', {'class':'css-chan6m'}).text
+        return _data
+
     async def parse(self):
         start_time = time.time()
         async with aiohttp.ClientSession() as session:
             while True:
                 url = await self.__build_url(self._first_page)
                 print(url)
-                html = await self.__request(session, url) # self
-                soup = self.__get_soup(html)
+                html = await self.__request(session, url)
+                soup = await self.__get_soup(html)
                 list_page = self.__get_list_page_main_block(soup)
-                await self.__gather_data(list_page)
-
-
-                break
+                data = self.__gather_data(list_page)
+                async for d in data:
+                    html = await self.__request(session, d.yelp_url)
+                    soup = await self.__get_soup(html)
+                    review_info  = await self.__gather_review_info(soup)
+                    d.reviews = review_info
+                    self.logger.info(f'Gathered data: {d}')
                 self._first_page += 10
+                if self._first_page >= self._number_of_pages * 10:
+                    break
 
-        self.logger.info('Done in {} seconds'.format(time.time() - start_time))
-if __name__ == '__main__':
-    import asyncio
-    crawler = Crawler('restaurants', 'New York, NY')
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(crawler.parse())
+        self.logger.info(f'Information gathered in {time.time() - start_time} seconds')

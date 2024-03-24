@@ -9,4 +9,4 @@ USER_AGENT_LIST = [
 ]
 
 def generate_user_agent():
-    return USER_AGENT_LIST[random.randint(0, len(USER_AGENT_LIST) - 1)]
+    return {"User-Agent": USER_AGENT_LIST[random.randint(0, len(USER_AGENT_LIST) - 1)]}
